@@ -81,7 +81,7 @@ class MessageListener(stomp.ConnectionListener):
             return
 
         try:
-            temp_dir = self.configuration.get('temporary_directory', '/tmp')
+            temp_dir = self.configuration.get('temporary_directory')
             if not os.path.exists(temp_dir):
                 os.makedirs(temp_dir, exist_ok=True)
         except Exception as e:
@@ -193,8 +193,8 @@ def parse_config(config_file_path: str) -> dict:
     with open(config_file_path, 'r') as f:
         config_data = yaml.safe_load(f)
     if 'stomp' in config_data:
-        config['stomp_server'] = config_data['stomp'].get('server', '127.0.0.1')
-        config['stomp_port'] = config_data['stomp'].get('port', 61613)
+        config['stomp_server'] = config_data['stomp'].get('server')
+        config['stomp_port'] = config_data['stomp'].get('port')
         config['stomp_login'] = config_data['stomp'].get('login', None)
         config['stomp_password'] = config_data['stomp'].get('password', None)
         config['stomp_queue'] = config_data['stomp'].get('queue', None)
@@ -212,36 +212,28 @@ def parse_config(config_file_path: str) -> dict:
         config['log_file'] = config_data.get('log_file')
     return config
 
-def parse_command_line_args(config_data: dict, parser_args: Namespace) -> dict:
+def parse_command_line_args(config_data: dict, parser_cli_args: Namespace) -> dict:
     """Override configuration dictionary with command line arguments if provided.
     :param config_data: configuration dictionary
-    :param parser_args: command line arguments
+    :param parser_cli_args: command line arguments
     :return: updated configuration dictionary
     """
-    if 'stomp-server' in parser_args and parser_args['stomp-server'] is not None:
-        config_data['stomp_server'] = parser_args['stomp-server']
-    if 'stomp-port' in parser_args and parser_args['stomp-port'] is not None:
-        config_data['stomp_port'] = parser_args['stomp-port']
-    if 'stomp-login' in parser_args and parser_args['stomp-login'] is not None:
-        config_data['stomp_login'] = parser_args['stomp-login']
-    if 'stomp-password' in parser_args and parser_args['stomp-password'] is not None:
-        config_data['stomp_password'] = parser_args['stomp-password']
-    if 'concurrent-workers' in parser_args and parser_args['concurrent-workers'] is not None:
-        config_data['concurrent_workers'] = parser_args['concurrent-workers']
-    if 'concurrent_workers' not in config_data:
-        config_data['concurrent_workers'] = 4  # default value
-    if 'tesseract-path' in parser_args and parser_args['tesseract-path'] is not None:
-        config_data['tesseract_path'] = parser_args['tesseract-path']
-    if 'convert-path' in parser_args and parser_args['convert-path'] is not None:
-        config_data['convert_path'] = parser_args['convert-path']
-    if 'identify-path' in parser_args and parser_args['identify-path'] is not None:
-        config_data['identify_path'] = parser_args['identify-path']
-    if 'temporary-directory' in parser_args and parser_args['temporary-directory'] is not None:
-        config_data['temporary_directory'] = parser_args['temporary-directory']
-    if 'log-level' in parser_args and parser_args['log-level'] is not None:
-        config_data['log_level'] = parser_args['log-level']
-    if 'log-file' in parser_args and parser_args['log-file'] is not None:
-        config_data['log_file'] = parser_args['log-file']
+    override_args = [
+        'stomp_server',
+        'stomp_port',
+        'stomp_login',
+        'stomp_password',
+        'concurrent_workers',
+        'tesseract_path',
+        'convert_path',
+        'identify_path',
+        'temporary_directory',
+        'log_level',
+        'log_file'
+    ]
+    for arg in override_args:
+        if getattr(parser_cli_args, arg) and getattr(parser_cli_args, arg) is not None:
+            config_data[arg] = getattr(parser_cli_args, arg)
     return config_data
 
 def main(args: Namespace) -> None:
@@ -251,17 +243,17 @@ def main(args: Namespace) -> None:
     config_data = parse_config(args.config_file)
     config_data = parse_command_line_args(config_data, args)
     errors = []
-    if 'tesseract_path' not in config_data:
-        errors.append("tesseract_path not defined")
-    if 'convert_path' not in config_data:
-        errors.append("convert_path not defined")
-    if 'identify_path' not in config_data:
-        errors.append("identify_path not defined")
+    check_exec = ['tesseract_path', 'convert_path', 'identify_path']
+    for e in check_exec:
+        if e not in config_data or not config_data[e]:
+            errors.append(f"{e} not defined")
+        elif not os.path.isfile(config_data[e]) or not os.access(config_data[e], os.X_OK):
+            errors.append(f"{e} '{config_data[e]}' does not exist or is not executable")
+
     if errors:
         for error in errors:
             print(f"Error: {error}")
         raise ValueError("Configuration errors found. Please fix and try again.")
-    print("Configuration successfully loaded:")
     main_worker(config_data)
 
 
@@ -269,16 +261,16 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OCR/hOCR derivative service")
     parser.add_argument("--config-file", type=str, default="config.yaml", required=False, help="Path to a Yaml configuration file")
     g2 = parser.add_argument_group("Command line options (override config file settings, if set)")
-    g2.add_argument("--stomp-server", type=str, default=None, required=False, help="Stomp server address (default: 127.0.0.1)")
-    g2.add_argument("--stomp-port", type=int, default=None, required=False, help="Stomp server port (default: 61613)")
+    g2.add_argument("--stomp-server", type=str, default='127.0.0.1', required=False, help="Stomp server address (default: 127.0.0.1)")
+    g2.add_argument("--stomp-port", type=int, default=61613, required=False, help="Stomp server port (default: 61613)")
     g2.add_argument("--stomp-login", type=str, default=None, required=False, help="Stomp login")
     g2.add_argument("--stomp-password", type=str, default=None, required=False, help="Stomp password")
     g2.add_argument("--stomp-queue", type=str, default=None, required=False, help="Stomp message queue name")
-    g2.add_argument("--concurrent-workers", type=int, default=None, required=False, help="Number of concurrent workers (default: 4)")
+    g2.add_argument("--concurrent-workers", type=int, default=1, required=False, help="Number of concurrent workers (default: 1)")
     g2.add_argument("--tesseract-path", type=str, default=None, required=False, help="Path to tesseract executable")
     g2.add_argument("--convert-path", type=str, default=None, required=False, help="Path to ImageMagick convert executable")
     g2.add_argument("--identify-path", type=str, default=None, required=False, help="Path to ImageMagick identify executable")
-    g2.add_argument("--temporary-directory", type=str, default=None, required=False, help="Path to temporary working directory (default: /tmp)")
+    g2.add_argument("--temporary-directory", type=str, default="/tmp", required=False, help="Path to temporary working directory (default: /tmp)")
     g2.add_argument("--log-file", type=str, default=None, required=False, help="Path to log file")
     g2.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], required=False, help="Logging level (default: INFO)")
     parser_args = parser.parse_args()
