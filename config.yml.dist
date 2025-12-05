@@ -1,0 +1,14 @@
+stomp:
+    server: 'localhost'
+    port: 61613
+    login: 'guest'
+    password: 'guest'
+    queue: 'islandora/connector-ocr'
+concurrent_workers: 1
+temporary_directory: '/tmp/image_processor'
+tools:
+    tesseract_path: '/usr/bin/tesseract'
+    convert_path: '/usr/bin/convert'
+    identify_path: '/usr/bin/identify'
+log_file: 'ocr_worker.log'
+log_level: 'DEBUG'
