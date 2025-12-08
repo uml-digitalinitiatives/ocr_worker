@@ -22,7 +22,7 @@ You can find a sample configuration file [here](config.yml.dist).
 ### Configuration Parameters
 
 * `--config-file`: (string) Path to the YAML configuration file.
-* `--stomp-server`: (string) The hostname or IP address of the STOMP message broker (default: localhost).
+* `--stomp-server`: (string) The hostname or IP address of the STOMP message broker (default: 127.0.0.1).
 * `--stomp-port`: (int) The port number of the STOMP message broker (default: 61613).
 * `--stomp-login`: (string) The login username for the STOMP message broker.
 * `--stomp-password`: (string) The login password for the STOMP message broker.
@@ -31,7 +31,7 @@ You can find a sample configuration file [here](config.yml.dist).
 * `--tesseract-path`: (string) The path to the tesseract executable.
 * `--convert-path`: (string) The path to the ImageMagick convert executable.
 * `--identify-path`: (string) The path to the ImageMagick identify executable.
-* `--temporary-directory`: (string) The path to a temporary directory for processing files.
+* `--temporary-directory`: (string) The path to a temporary directory for processing files (default: /tmp).
 * `--log-file`: (string) The path to the log file.
 * `--log-level`: (string) The logging level (DEBUG, INFO, WARNING, ERROR) (default: INFO).
 

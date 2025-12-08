@@ -21,11 +21,12 @@ class MessageListener(stomp.ConnectionListener):
     executor = None
     configuration = {}
 
-    def __init__(self, conn: StompConnection12, executor: ThreadPoolExecutor, config: dict, logger: logging.Logger):
+    def __init__(self, conn: StompConnection12, executor: ThreadPoolExecutor, config: dict, logger: logging.Logger, shutdown_flag: bool = False):
         self.executor = executor
         self.connection = conn
         self.configuration = config
         self.logger = logger
+        self.shutdown_flag = shutdown_flag
 
     def on_error(self, frame):
         """Message listener error handler.
@@ -38,11 +39,14 @@ class MessageListener(stomp.ConnectionListener):
         :param frame: STOMP frame
         """
         self.logger.debug('received a message headers -> ("%s"), body -> ("%s")' % (frame.headers, frame.body))
-        try:
-            future = self.executor.submit(self._process_message, frame)
-            future.add_done_callback(self._log_future_exception)
-        except Exception as e:
-            self.logger.error(f"Failed to submit message to executor: {e}")
+        if not self.shutdown_flag:
+            try:
+                future = self.executor.submit(self._process_message, frame)
+                future.add_done_callback(self._log_future_exception)
+            except Exception as e:
+                self.logger.error(f"Failed to submit message to executor: {e}")
+        else:
+            self.logger.info("Shutdown flag is set, not processing new messages.")
 
     def _log_future_exception(self, future):
         """Log exceptions from future tasks.
@@ -178,13 +182,14 @@ def main_worker(configuration: dict) -> None:
         print('Received keyboard interrupt, quitting.')
     finally:
         try:
+            listener.shutdown_flag = True
             executor.shutdown(wait=True)
             conn.disconnect()
         except Exception as e:
             print(f"Error during shutdown: {e}")
 
 
-def parse_config(config_file_path: str) -> dict:
+def _parse_config(config_file_path: str) -> dict:
     """Parse configuration file and return configuration dictionary.
     :param config_file_path: configuration file path
     :return: configuration dictionary
@@ -212,7 +217,7 @@ def parse_config(config_file_path: str) -> dict:
         config['log_file'] = config_data.get('log_file')
     return config
 
-def parse_command_line_args(config_data: dict, parser_cli_args: Namespace) -> dict:
+def _parse_command_line_args(config_data: dict, parser_cli_args: Namespace) -> dict:
     """Override configuration dictionary with command line arguments if provided.
     :param config_data: configuration dictionary
     :param parser_cli_args: command line arguments
@@ -236,12 +241,34 @@ def parse_command_line_args(config_data: dict, parser_cli_args: Namespace) -> di
             config_data[arg] = getattr(parser_cli_args, arg)
     return config_data
 
+def _set_defaults(config_data: dict) -> dict:
+    """Set default values for configuration dictionary if not already set.
+    :param config_data: configuration dictionary
+    :return: updated configuration dictionary with defaults set
+    """
+    defaults = {
+        'stomp_server': '127.0.0.1',
+        'stomp_port': 61613,
+        'concurrent_workers': 1,
+        'temporary_directory': '/tmp',
+        'log_level': 'INFO'
+    }
+    for key, value in defaults.items():
+        if key not in config_data or config_data[key] is None:
+            config_data[key] = value
+    return config_data
+
 def main(args: Namespace) -> None:
     """Main function to process arguments and call main worker.
     :param args: command line arguments
     """
-    config_data = parse_config(args.config_file)
-    config_data = parse_command_line_args(config_data, args)
+    if args.config_file is not None:
+        config_data = _parse_config(args.config_file)
+    else:
+        print("There is no configuration file specified, using only command line arguments.")
+        config_data = {}
+    config_data = _parse_command_line_args(config_data, args)
+    config_data = _set_defaults(config_data)
     errors = []
     check_exec = ['tesseract_path', 'convert_path', 'identify_path']
     for e in check_exec:
@@ -259,19 +286,19 @@ def main(args: Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="OCR/hOCR derivative service")
-    parser.add_argument("--config-file", type=str, default="config.yaml", required=False, help="Path to a Yaml configuration file")
+    parser.add_argument("--config-file", type=str, default=None, required=False, help="Path to a Yaml configuration file")
     g2 = parser.add_argument_group("Command line options (override config file settings, if set)")
-    g2.add_argument("--stomp-server", type=str, default='127.0.0.1', required=False, help="Stomp server address (default: 127.0.0.1)")
-    g2.add_argument("--stomp-port", type=int, default=61613, required=False, help="Stomp server port (default: 61613)")
+    g2.add_argument("--stomp-server", type=str, default=None, required=False, help="Stomp server address (default: 127.0.0.1)")
+    g2.add_argument("--stomp-port", type=int, default=None, required=False, help="Stomp server port (default: 61613)")
     g2.add_argument("--stomp-login", type=str, default=None, required=False, help="Stomp login")
     g2.add_argument("--stomp-password", type=str, default=None, required=False, help="Stomp password")
     g2.add_argument("--stomp-queue", type=str, default=None, required=False, help="Stomp message queue name")
-    g2.add_argument("--concurrent-workers", type=int, default=1, required=False, help="Number of concurrent workers (default: 1)")
+    g2.add_argument("--concurrent-workers", type=int, default=None, required=False, help="Number of concurrent workers (default: 1)")
     g2.add_argument("--tesseract-path", type=str, default=None, required=False, help="Path to tesseract executable")
     g2.add_argument("--convert-path", type=str, default=None, required=False, help="Path to ImageMagick convert executable")
     g2.add_argument("--identify-path", type=str, default=None, required=False, help="Path to ImageMagick identify executable")
-    g2.add_argument("--temporary-directory", type=str, default="/tmp", required=False, help="Path to temporary working directory (default: /tmp)")
+    g2.add_argument("--temporary-directory", type=str, default=None, required=False, help="Path to temporary working directory (default: /tmp)")
     g2.add_argument("--log-file", type=str, default=None, required=False, help="Path to log file")
-    g2.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"], required=False, help="Logging level (default: INFO)")
+    g2.add_argument("--log-level", type=str, default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], required=False, help="Logging level (default: INFO)")
     parser_args = parser.parse_args()
     main(parser_args)
