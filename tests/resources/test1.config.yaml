@@ -1,0 +1,18 @@
+stomp:
+    server: 'example.server.com'
+    port: 61613
+    login: alpaca
+    password: "alpacaPassword"
+    queue: islandora/connector-ocr
+jwt:
+    username: drupal_user
+    password: 'drupalPassword'
+    drupal_base_url: 'https://drupal.instance.url'
+concurrent_workers: 3
+#temporary_directory: '/var/tmp'
+tools:
+    tesseract_path: /usr/bin/tesseract
+    convert_path: /usr/bin/convert
+    identify_path: /usr/bin/identify
+log_file: /opt/ocrWorker/ocr_worker.log
+log_level: DEBUG

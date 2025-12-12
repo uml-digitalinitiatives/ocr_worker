@@ -4,6 +4,10 @@ stomp:
     login: guest
     password: guest
     queue: islandora/connector-ocr
+jwt:
+    username: workbench_user
+    password: secure_password
+    drupal_base_url: https://islandora.dev
 concurrent_workers: 1
 temporary_directory: /tmp/image_processor
 tools:

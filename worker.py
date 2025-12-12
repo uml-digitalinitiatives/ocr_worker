@@ -10,16 +10,22 @@ from argparse import Namespace
 from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
 from tempfile import NamedTemporaryFile
+from typing import Union
 
 import requests
 import stomp
 import yaml
 from stomp.connect import StompConnection12
 
+class TokenFailedException(Exception):
+    """Custom exception for token retrieval failures."""
+    pass
+
 class MessageListener(stomp.ConnectionListener):
     connection = None
     executor = None
     configuration = {}
+    local_token = None
 
     def __init__(self, conn: StompConnection12, executor: ThreadPoolExecutor, config: dict, logger: logging.Logger, shutdown_flag: bool = False):
         self.executor = executor
@@ -55,6 +61,79 @@ class MessageListener(stomp.ConnectionListener):
         exception = future.exception()
         if exception:
             self.logger.error(f"Exception in message processing: {exception}")
+
+    def _get_new_jwt_token(self, refresh: bool = False) -> Union[str, None]:
+        """Obtain a new JWT token.
+        :param refresh: Whether to refresh the token
+        :return: JWT token string
+        """
+        if self.local_token is not None and not refresh:
+            return self.local_token
+        try:
+            username = self.configuration.get('jwt_username', None)
+            password = self.configuration.get('jwt_password', None)
+            drupal_base_url = self.configuration.get('jwt_drupal_base_url', None)
+            if username is None or password is None:
+                self.logger.error("JWT username or password not provided in configuration.")
+                return None
+            if drupal_base_url is None:
+                self.logger.error("Drupal base URL not provided in configuration.")
+                return None
+            drupal_base_url = drupal_base_url.rstrip('/')
+
+            resp = requests.post(
+                f"{drupal_base_url}/user/login?_format=json",
+                json={"name": username, "pass": password},
+                headers={"Content-Type": "application/json"},
+                timeout=30
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            token = data.get('access_token', None)
+            if not token:
+                self.logger.error("JWT token (access_token) not found in response.")
+                return None
+            self.local_token = f"Bearer {token}"
+        except KeyError as e:
+            self.logger.error(f"Missing expected configuration key: {e}")
+            return None
+        except JSONDecodeError as e:
+            self.logger.error(f"JSON decode error while obtaining JWT token: {e}")
+            return None
+        except requests.exceptions.HTTPError as e:
+            self.logger.error(f"HTTP error while obtaining JWT token: {e}")
+            return None
+        except Exception as e:
+            self.logger.error(f"Unexpected error while obtaining JWT token: {e}")
+            return None
+        return self.local_token
+
+    def _do_file_upload(self, url: str, file_name: str, token: str, mimetype: str, location: str, msg_id: str, sub_id: str) -> None:
+        """Upload a file to the specified URL.
+        :param url: Upload URL
+        :param file_name: Local file name to upload
+        :param token: Authorization token
+        :param mimetype: MIME type of the file
+        :param location: Content-Location header value
+        :param msg_id: Message ID for acknowledgment
+        :param sub_id: Subscription ID for acknowledgment
+        """
+        try:
+            headers = {'Authorization': token, 'Content-Type': mimetype,
+                       'Content-Location': location}
+            with open(file_name, 'rb') as f:
+                put_resp = requests.put(url, data=f, headers=headers, timeout=300)
+            put_resp.raise_for_status()
+            self.logger.info(f"Successfully uploaded processed file to {url}")
+            self.connection.ack(msg_id, sub_id)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if getattr(e, "response", None) is not None else None
+            if status and status == 403:
+                self.logger.debug(f"Received 403 status code while uploading file to {url}: {status}")
+                raise TokenFailedException(e)
+            self.logger.error(f"Failed to upload file to {url}")
+            raise
+
 
     def _process_message(self, frame):
         """Process a single message frame.
@@ -120,19 +199,26 @@ class MessageListener(stomp.ConnectionListener):
 
         self.logger.info(f"Tesseract completed successfully for message ID: {output_id}")
         files = glob.glob(temp_dir + "/" + output_id + ".*")
+        if len(files) != 1:
+            self.logger.error(f"Expected one output file, found {len(files)} for message ID: {output_id}")
+            self.connection.nack(message_id, subscription_id)
+            return
+
+        has_local_token = self.local_token is not None
         try:
-            if len(files) == 1:
-                headers = {'Authorization': authorization, 'Content-Type': mimetype,
-                           'Content-Location': content_location}
-                with open(files[0], 'rb') as f:
-                    put_resp = requests.put(destination, data=f, headers=headers, timeout=300)
-                put_resp.raise_for_status()
-                self.logger.info(f"Successfully uploaded processed file to {destination} for message ID: {output_id}")
-                self.connection.ack(message_id, subscription_id)
-            else:
-                self.logger.error(f"Expected one output file, found {len(files)} for message ID: {output_id}")
-                self.connection.nack(message_id, subscription_id)
-                return
+            self._do_file_upload(destination, file_name=files[0], token=authorization, mimetype=mimetype, location=content_location, msg_id=message_id, sub_id=subscription_id)
+        except TokenFailedException:
+            new_token = self._get_new_jwt_token()
+            if new_token:
+                try:
+                    self._do_file_upload(destination, file_name=files[0], token=new_token, mimetype=mimetype, location=content_location, msg_id=message_id, sub_id=subscription_id)
+                except TokenFailedException:
+                    if has_local_token:
+                        self.logger.error(f"Failed to upload with existing new token, refreshing our local token")
+                        new_token = self._get_new_jwt_token(True)
+                        if new_token:
+                            # If this fails, we give up
+                            self._do_file_upload(destination, file_name=files[0], token=new_token, mimetype=mimetype, location=content_location, msg_id=message_id, sub_id=subscription_id)
         except requests.exceptions.HTTPError as e:
             self.logger.error(f"HTTP error during file upload for message ID: {output_id}: {e}")
             self.connection.nack(message_id, subscription_id)
@@ -161,7 +247,7 @@ def main_worker(configuration: dict) -> None:
     if 'log_file' in configuration:
         ch = logging.FileHandler(configuration['log_file'])
     else:
-        ch = logging.StreamHandler()
+        ch = logging.StreamHandler() #  log to stderr
     ch.setFormatter(fmt)
     logger.addHandler(ch)
     logger.propagate = False
@@ -203,6 +289,10 @@ def _parse_config(config_file_path: str) -> dict:
         config['stomp_login'] = config_data['stomp'].get('login', None)
         config['stomp_password'] = config_data['stomp'].get('password', None)
         config['stomp_queue'] = config_data['stomp'].get('queue', None)
+    if 'jwt' in config_data:
+        config['jwt_username'] = config_data['jwt'].get('username', None)
+        config['jwt_password'] = config_data['jwt'].get('password', None)
+        config['jwt_drupal_base_url'] = config_data['jwt'].get('drupal_base_url', None)
     if 'tools' in config_data:
         config['tesseract_path'] = config_data['tools'].get('tesseract_path')
         config['convert_path'] = config_data['tools'].get('convert_path')
@@ -234,11 +324,17 @@ def _parse_command_line_args(config_data: dict, parser_cli_args: Namespace) -> d
         'identify_path',
         'temporary_directory',
         'log_level',
-        'log_file'
+        'log_file',
+        'jwt_username',
+        'jwt_password',
+        'jwt_drupal_base_url'
     ]
     for arg in override_args:
-        if getattr(parser_cli_args, arg) and getattr(parser_cli_args, arg) is not None:
-            config_data[arg] = getattr(parser_cli_args, arg)
+        try:
+            if getattr(parser_cli_args, arg) is not None:
+                config_data[arg] = getattr(parser_cli_args, arg)
+        except AttributeError:
+            pass
     return config_data
 
 def _set_defaults(config_data: dict) -> dict:
@@ -298,6 +394,9 @@ if __name__ == "__main__":
     g2.add_argument("--convert-path", type=str, default=None, required=False, help="Path to ImageMagick convert executable")
     g2.add_argument("--identify-path", type=str, default=None, required=False, help="Path to ImageMagick identify executable")
     g2.add_argument("--temporary-directory", type=str, default=None, required=False, help="Path to temporary working directory (default: /tmp)")
+    g2.add_argument("--jwt-username", type=str, default=None, required=False, help="username for Drupal to get new JWT token")
+    g2.add_argument("--jwt-password", type=str, default=None, required=False, help="password for Drupal to get new JWT token")
+    g2.add_argument("--jwt-drupal_base_url", type=str, default=None, required=False, help="Base URL for Drupal site to get new JWT token")
     g2.add_argument("--log-file", type=str, default=None, required=False, help="Path to log file")
     g2.add_argument("--log-level", type=str, default=None, choices=["DEBUG", "INFO", "WARNING", "ERROR"], required=False, help="Logging level (default: INFO)")
     parser_args = parser.parse_args()

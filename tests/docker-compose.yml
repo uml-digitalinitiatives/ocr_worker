@@ -1,0 +1,10 @@
+services:
+  activemq:
+    image: rmohr/activemq:latest
+    ports:
+      - "61613:61613"   # STOMP
+      - "8161:8161"     # Web console
+      - "61616:61616"   # OpenWire/JMS
+    environment:
+      ACTIVEMQ_ADMIN_LOGIN: admin
+      ACTIVEMQ_ADMIN_PASSWORD: admin
