@@ -27,6 +27,9 @@ You can find a sample configuration file [here](config.yml.dist).
 * `--stomp-login`: (string) The login username for the STOMP message broker.
 * `--stomp-password`: (string) The login password for the STOMP message broker.
 * `--stomp-queue`: (string) The name of the STOMP queue to listen to.
+* `--jwt-username`: (string) A Drupal username for authenticating with Islandora.
+* `--jwt-password`: (string) The password for the Drupal user.
+* `--jwt-drupal_base_url`: (string) The hostname of the Drupal site.
 * `--concurrent-workers`: (int) The number of concurrent worker threads to process messages (default: 1).
 * `--tesseract-path`: (string) The path to the tesseract executable.
 * `--convert-path`: (string) The path to the ImageMagick convert executable.
@@ -44,6 +47,10 @@ stomp:
     login: guest
     password: guest
     queue: islandora/connector-ocr
+jwt:
+    username: drupal_user
+    password: drupal_password
+    drupal_base_url: http://localhost
 concurrent_workers: 1
 temporary_directory: /tmp/image_processor
 tools:
@@ -54,3 +61,40 @@ log_file: ocr_worker.log
 log_level: DEBUG
 ```
 
+## Usage
+To run the OCR worker, use the following command:
+
+```bash
+python ocr_worker.py --config-file config.yml
+```
+
+### JWT expiration
+
+Messages retrieved from the Stomp/JMS queue contain a JWT token for authentication with Drupal. These tokens have
+an expiration time and if the token is expired when the message is processed, the script will attempt to 
+re-authenticate with Drupal using the provided username and password to obtain a new token.
+
+Ensure that the Drupal user specified in the configuration has the necessary permissions to upload OCR/hOCR files.
+
+### SystemD
+
+You can create a SystemD service file to run this script as a daemon. Here is a sample service file:
+
+```ini
+[Unit]
+Description=OCR Worker Service
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ocr_worker
+ExecStart=/opt/ocr_worker/.venv/bin/python3 /opt/ocr_worker/worker.py --config-file /opt/ocr_worker/local.yml
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+```
