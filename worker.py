@@ -13,15 +13,28 @@ from tempfile import NamedTemporaryFile
 from typing import Union
 
 import requests
-import stomp
 import yaml
-from stomp.connect import StompConnection12
+
+# Make stomp optional so tests that only import _parse_config/_parse_command_line_args can run
+try:
+    import stomp
+    from stomp.connect import StompConnection12
+    STOMP_AVAILABLE = True
+except Exception:
+    stomp = None
+    # Provide fallbacks so type hints and base classes don't break imports in test environments
+    class StompConnection12:  # type: ignore
+        pass
+    STOMP_AVAILABLE = False
+
+# Choose base class for MessageListener depending on stomp availability
+MessageListenerBase = stomp.ConnectionListener if STOMP_AVAILABLE and hasattr(stomp, 'ConnectionListener') else object
 
 class TokenFailedException(Exception):
     """Custom exception for token retrieval failures."""
     pass
 
-class MessageListener(stomp.ConnectionListener):
+class MessageListener(MessageListenerBase):
     connection = None
     executor = None
     configuration = {}
@@ -125,7 +138,12 @@ class MessageListener(stomp.ConnectionListener):
                 put_resp = requests.put(url, data=f, headers=headers, timeout=300)
             put_resp.raise_for_status()
             self.logger.info(f"Successfully uploaded processed file to {url}")
-            self.connection.ack(msg_id, sub_id)
+            # Acknowledge the message on success
+            try:
+                self.connection.ack(msg_id, sub_id)
+            except Exception:
+                # Non-fatal; log and continue
+                self.logger.debug("Failed to ack message after successful upload", exc_info=True)
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if getattr(e, "response", None) is not None else None
             if status and status == 403:
@@ -147,7 +165,10 @@ class MessageListener(stomp.ConnectionListener):
             payload = json.loads(frame.body)
         except JSONDecodeError as e:
             self.logger.error(f"JSON decode error: {e} in message ID: {message_id}")
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
 
         try:
@@ -160,7 +181,10 @@ class MessageListener(stomp.ConnectionListener):
             process_id = payload['object']['id']
         except KeyError as e:
             self.logger.error(f"Missing expected element: {e} in message ID: {message_id}")
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
 
         try:
@@ -169,7 +193,10 @@ class MessageListener(stomp.ConnectionListener):
                 os.makedirs(temp_dir, exist_ok=True)
         except Exception as e:
             self.logger.error(f"Failed to create temporary directory: {e} in message ID: {message_id}")
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
 
         output_id = f"{process_id.replace(':','_')}-{message_id.replace(',','_')}"
@@ -194,14 +221,20 @@ class MessageListener(stomp.ConnectionListener):
                 f"Tesseract failed (rc={result.returncode}) for message ID: {output_base}. "
                 f"stdout: {result.stdout!r} stderr: {result.stderr!r}"
             )
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
 
         self.logger.info(f"Tesseract completed successfully for message ID: {output_id}")
         files = glob.glob(temp_dir + "/" + output_id + ".*")
         if len(files) != 1:
             self.logger.error(f"Expected one output file, found {len(files)} for message ID: {output_id}")
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
 
         has_local_token = self.local_token is not None
@@ -221,7 +254,10 @@ class MessageListener(stomp.ConnectionListener):
                             self._do_file_upload(destination, file_name=files[0], token=new_token, mimetype=mimetype, location=content_location, msg_id=message_id, sub_id=subscription_id)
         except requests.exceptions.HTTPError as e:
             self.logger.error(f"HTTP error during file upload for message ID: {output_id}: {e}")
-            self.connection.nack(message_id, subscription_id)
+            try:
+                self.connection.nack(message_id, subscription_id)
+            except Exception:
+                self.logger.debug("Failed to nack message", exc_info=True)
             return
         finally:
             # cleanup temporary files
@@ -251,7 +287,20 @@ def main_worker(configuration: dict) -> None:
     ch.setFormatter(fmt)
     logger.addHandler(ch)
     logger.propagate = False
-    conn = stomp.Connection12([(configuration['stomp_server'], configuration['stomp_port'])], heartbeats=(30000, 30000))
+    # Only import/use stomp if it is available; tests that don't want stomp can still import module
+    if not STOMP_AVAILABLE:
+        raise RuntimeError("stomp library is required to run the worker. Install the 'stomp.py' package.")
+
+    # Determine heartbeat interval from configuration (seconds) and convert to milliseconds for stomp
+    heartbeat_seconds = configuration.get('stomp_heartbeat_seconds', 30)
+    try:
+        hb_sec = int(heartbeat_seconds)
+    except Exception:
+        hb_sec = 30
+    hb_ms = hb_sec * 1000
+
+    conn = stomp.Connection12([(configuration['stomp_server'], configuration['stomp_port'])], heartbeats=(hb_ms, hb_ms), keepalive=True)
+    # Limit the executor to the configured concurrent_workers
     executor = ThreadPoolExecutor(max_workers=configuration['concurrent_workers'])
     listener = MessageListener(conn, executor, configuration, logger)
     conn.set_listener('ocrWorker', listener)
@@ -260,7 +309,6 @@ def main_worker(configuration: dict) -> None:
         conn.subscribe(destination=configuration['stomp_queue'], id=f'ocrWorker-{i}', ack='client-individual')
 
     # Wait until we receive a shutdown signal
-    # TODO: Is this the most efficient way to do this?
     try:
         while True:
             time.sleep(100)

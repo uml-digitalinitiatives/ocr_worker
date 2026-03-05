@@ -4,6 +4,7 @@ stomp:
     login: alpaca
     password: "alpacaPassword"
     queue: islandora/connector-ocr
+    heartbeat_seconds: 60
 jwt:
     username: drupal_user
     password: 'drupalPassword'
