@@ -67,6 +67,36 @@ class MessageListener(MessageListenerBase):
         else:
             self.logger.info("Shutdown flag is set, not processing new messages.")
 
+    def on_disconnected(self):
+        """Called by stomp.py when the connection is lost."""
+        self.logger.warning("Disconnected from broker. Attempting to reconnect...")
+        if self.shutdown_flag:
+            return
+        reconnected = False
+        for attempt in range(1, 11):  # try 10 times
+            try:
+                time.sleep(min(2 ** attempt, 60))  # exponential backoff, max 60s
+                self.connection.connect(
+                    self.configuration['stomp_login'],
+                    self.configuration['stomp_password'],
+                    wait=True
+                )
+                # Re-subscribe with the same subscriptions
+                for i in range(self.configuration['concurrent_workers']):
+                    self.connection.subscribe(
+                        destination=self.configuration['stomp_queue'],
+                        id=f'ocrWorker-{i}',
+                        ack='client-individual'
+                    )
+                self.logger.info("Reconnected and resubscribed successfully.")
+                reconnected = True
+                break
+            except Exception as e:
+                self.logger.error(f"Reconnect attempt {attempt} failed: {e}")
+        if not reconnected:
+            self.logger.error("Could not reconnect after 10 attempts. Exiting.")
+            os._exit(1)  # Force exit so systemd/supervisor can restart the process
+
     def _log_future_exception(self, future):
         """Log exceptions from future tasks.
         :param future: Future object
