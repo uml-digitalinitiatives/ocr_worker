@@ -177,7 +177,7 @@ class MessageListener(MessageListenerBase):
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if getattr(e, "response", None) is not None else None
             if status and status == 403:
-                self.logger.debug(f"Received 403 status code while uploading file to {url}: {status}")
+                self.logger.warning(f"Received 403 status code while uploading file to {url}: {status}")
                 raise TokenFailedException(e)
             self.logger.error(f"Failed to upload file to {url}")
             raise
